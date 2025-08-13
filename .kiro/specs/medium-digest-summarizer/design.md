@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Medium Digest Summarizer is an AWS Serverless application built with Python and AWS CDK that processes Medium Daily Digest emails, extracts article content, generates AI summaries, and sends formatted messages to Slack. The system follows a serverless architecture using AWS Lambda, API Gateway, Secrets Manager, and Bedrock (Nova) services.
+The Medium Digest Summarizer is an AWS Serverless application built with Python and AWS CDK that processes Medium Daily Digest emails stored in S3, extracts article content, generates AI summaries, and sends formatted messages to Slack. The system follows a serverless architecture using AWS Lambda, S3, Step Functions, Secrets Manager, and Bedrock (Nova) services deployed in the us-east-1 region.
 
 ## Architecture
 
@@ -10,8 +10,8 @@ The Medium Digest Summarizer is an AWS Serverless application built with Python 
 
 ```mermaid
 graph TD
-    A[User] -->|POST /process-digest| B[API Gateway]
-    B --> C[Trigger Lambda]
+    A[User] -->|Upload Email| B[S3 Bucket]
+    B -->|S3 Event| C[Trigger Lambda]
     C --> D[Step Function]
     D --> E[Parse Email Lambda]
     E --> F[Fetch Articles Lambda]
@@ -27,8 +27,8 @@ graph TD
 
 ### Component Flow
 
-1. **API Gateway** receives POST requests with email payload
-2. **Trigger Lambda** initiates Step Function execution
+1. **S3 Bucket** receives uploaded email files and triggers processing
+2. **Trigger Lambda** initiates Step Function execution from S3 events
 3. **Step Function** orchestrates the workflow with the following states:
    - Parse Email State (Lambda)
    - Fetch Articles State (Lambda with Map for parallel processing)
@@ -41,33 +41,26 @@ graph TD
 
 ## Components and Interfaces
 
-### 1. API Gateway
+### 1. S3 Bucket
 
-**Purpose**: HTTP endpoint for receiving email payloads
+**Purpose**: Storage for Medium Daily Digest email files with automatic event triggering
 
 **Configuration**:
-- REST API with POST method
-- CORS enabled for web clients
-- Request validation for JSON payload
-- Usage plan with 10 requests per day limit
-- API key authentication required
+- Dedicated bucket for email storage
+- Event notifications enabled for object creation
+- Automatic triggering of processing workflow
+- File type filtering to avoid unnecessary triggers
+- Secure access controls and encryption
+
+**Supported File Formats**:
+- Plain text (.txt)
+- HTML files (.html)
+- JSON files (.json)
+
+**Event Configuration**:
+- Trigger on s3:ObjectCreated:* events
+- Filter for relevant file extensions
 - Integration with trigger Lambda function
-
-**Request Format**:
-```json
-{
-  "payload": "Medium Daily Digest email content as JSON string"
-}
-```
-
-**Response Format**:
-```json
-{
-  "statusCode": 200,
-  "message": "Processing completed",
-  "articlesProcessed": 3
-}
-```
 
 ### 2. Step Function State Machine
 
@@ -86,15 +79,16 @@ graph TD
 
 ### 3. Trigger Lambda Function
 
-**Purpose**: Initiate Step Function execution from API Gateway
+**Purpose**: Initiate Step Function execution from S3 events
 
 **Runtime**: Python 3.11
 **Memory**: 256 MB
 **Timeout**: 30 seconds
 
 **Key Methods**:
-- `lambda_handler(event, context)`: Parse API request and start Step Function
-- `validate_payload(payload)`: Validate input format
+- `lambda_handler(event, context)`: Parse S3 event and start Step Function
+- `extract_s3_info(event)`: Extract bucket and object key from S3 event
+- `retrieve_email_content(bucket, key)`: Get email content from S3 object
 
 ### 4. Parse Email Lambda Function
 
@@ -170,11 +164,13 @@ graph TD
 **Purpose**: Secure storage and retrieval of sensitive data
 
 **Secrets Stored**:
-- `medium-cookies`: Authentication cookies for Medium
+- `medium-cookies`: Authentication cookies for Medium stored as JSON array with complete cookie objects (domain, expiration, security flags, values)
 - `slack-webhook-url`: Slack webhook endpoint
 
 **Methods**:
 - `get_secret(secret_name: str) -> Dict`: Retrieve secret value
+- `parse_medium_cookies(cookies_json: str) -> List[Dict]`: Parse JSON array of Medium cookie objects
+- `format_cookies_for_requests(cookies: List[Dict]) -> Dict`: Convert cookie objects to format suitable for HTTP requests
 - `handle_secret_errors()`: Error handling for missing/expired secrets
 
 ### 9. Step Function Definition
@@ -390,6 +386,9 @@ class MediumDigestSummarizerStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs):
         super().__init__(scope, construct_id, **kwargs)
         
+        # S3 bucket for email storage
+        self.email_bucket = self._create_email_bucket()
+        
         # Lambda functions
         self.trigger_lambda = self._create_trigger_lambda()
         self.parse_email_lambda = self._create_parse_email_lambda()
@@ -400,13 +399,11 @@ class MediumDigestSummarizerStack(Stack):
         # Step Function
         self.state_machine = self._create_state_machine()
         
-        # API Gateway with usage plan
-        self.api_gateway = self._create_api_gateway()
-        self.usage_plan = self._create_usage_plan()
-        self.api_key = self._create_api_key()
-        
         # Secrets Manager
         self.secrets = self._create_secrets()
+        
+        # S3 event notification
+        self._setup_s3_event_notification()
         
         # IAM roles and policies
         self._setup_permissions()
@@ -426,11 +423,10 @@ class MediumDigestSummarizerStack(Stack):
    - CloudWatch logging enabled
    - Synchronous execution for API Gateway integration
 
-3. **API Gateway**
-   - REST API with CORS
-   - Request validation
-   - Usage plan with 10 requests per day limit
-   - API key authentication
+3. **S3 Bucket**
+   - Event notifications for object creation
+   - Secure access controls and encryption
+   - Integration with trigger Lambda function
    - Integration with trigger Lambda
 
 4. **Secrets Manager**
@@ -448,6 +444,59 @@ class MediumDigestSummarizerStack(Stack):
 ### Deployment Configuration
 
 - **Environment**: Development, Staging, Production
-- **Region**: Configurable (default: us-east-1)
+- **Region**: us-east-1
 - **Monitoring**: CloudWatch logs and metrics
 - **Alerting**: SNS notifications for critical errors
+
+## Security Considerations
+
+### Sensitive Data Management
+
+⚠️ **Critical Security Requirements:**
+
+1. **Secrets Management**
+   - All sensitive data (webhook URLs, cookies) stored in AWS Secrets Manager
+   - No hardcoded credentials in source code
+   - Automatic encryption at rest and in transit
+
+2. **Authentication Data**
+   - Medium cookies: Required for article fetching, stored securely
+   - Slack webhook URL: Required for notifications, stored securely
+   - Both must be configured before deployment
+
+3. **Repository Security**
+   - Repository has been cleaned of all sensitive data
+   - Git history rewritten to remove exposed credentials
+   - Enhanced .gitignore prevents future accidental commits
+
+4. **Access Control**
+   - Lambda functions use least-privilege IAM roles
+   - Secrets Manager access restricted to specific functions
+   - VPC isolation for sensitive operations (if required)
+
+### Security Best Practices
+
+1. **Data Protection**
+   - All data encrypted in transit (HTTPS/TLS)
+   - Secrets encrypted at rest in Secrets Manager
+   - CloudWatch logs do not contain sensitive data
+
+2. **Network Security**
+   - Lambda functions communicate over HTTPS only
+   - API endpoints use authentication where applicable
+   - Rate limiting implemented for external API calls
+
+3. **Monitoring and Auditing**
+   - CloudWatch logs for all function executions
+   - CloudTrail for API access auditing
+   - Alerts for security-related events
+
+### Deployment Security Checklist
+
+Before deploying:
+- [ ] Replace placeholder values with actual secrets
+- [ ] Verify Secrets Manager configuration
+- [ ] Test with non-production webhook first
+- [ ] Review IAM permissions
+- [ ] Enable CloudWatch monitoring
+- [ ] Configure alerting for failures

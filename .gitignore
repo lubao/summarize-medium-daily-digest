@@ -156,6 +156,14 @@ Thumbs.db
 .env.production
 secrets.json
 config.json
+medium-cookie.json
+slack-webhook.json
+*webhook*url*
+*medium*cookies*
+*api*key*
+*api_key*
+test_live_api.py
+test_complete_workflow.py
 
 # Logs
 *.log

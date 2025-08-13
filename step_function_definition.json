@@ -1,0 +1,333 @@
+{
+  "Comment": "Medium Digest Summarizer Workflow - Express workflow for processing Medium Daily Digest emails",
+  "StartAt": "ParseEmail",
+  "TimeoutSeconds": 300,
+  "States": {
+    "ParseEmail": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ParseEmailLambdaArn}",
+        "Payload.$": "$"
+      },
+      "ResultPath": "$.parseResult",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        },
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "HandleParseError",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "CleanupPayload"
+    },
+    "CleanupPayload": {
+      "Type": "Pass",
+      "Parameters": {
+        "parseResult.$": "$.parseResult"
+      },
+      "Next": "CheckParseResults"
+    },
+    "CheckParseResults": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.parseResult.Payload",
+          "IsPresent": true,
+          "Next": "FetchArticles"
+        }
+      ],
+      "Default": "NoArticlesFound"
+    },
+    "FetchArticles": {
+      "Type": "Map",
+      "ItemsPath": "$.parseResult.Payload",
+      "MaxConcurrency": 1,
+      "ResultPath": "$.fetchResults",
+      "Iterator": {
+        "StartAt": "FetchSingleArticle",
+        "States": {
+          "FetchSingleArticle": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${FetchArticleLambdaArn}",
+              "Payload": {
+                "url.$": "$.url"
+              }
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException"
+                ],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 3,
+                "BackoffRate": 2.0
+              },
+              {
+                "ErrorEquals": [
+                  "States.TaskFailed"
+                ],
+                "IntervalSeconds": 10,
+                "MaxAttempts": 5,
+                "BackoffRate": 2.0
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "FetchArticleError",
+                "ResultPath": "$.error"
+              }
+            ],
+            "Next": "FetchArticleSuccess"
+          },
+          "FetchArticleSuccess": {
+            "Type": "Pass",
+            "End": true
+          },
+          "FetchArticleError": {
+            "Type": "Pass",
+            "Parameters": {
+              "url.$": "$.url",
+              "error.$": "$.error",
+              "status": "failed"
+            },
+            "End": true
+          }
+        }
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "HandleFetchError",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "FilterSuccessfulFetches"
+    },
+    "FilterSuccessfulFetches": {
+      "Type": "Pass",
+      "Parameters": {
+        "articles.$": "$.fetchResults[?(@.Payload.body.title)]"
+      },
+      "ResultPath": "$.filteredArticles",
+      "Next": "CheckFetchedArticles"
+    },
+    "CheckFetchedArticles": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.filteredArticles.articles[0]",
+          "IsPresent": true,
+          "Next": "SummarizeArticles"
+        }
+      ],
+      "Default": "NoArticlesFetched"
+    },
+    "SummarizeArticles": {
+      "Type": "Map",
+      "ItemsPath": "$.filteredArticles.articles",
+      "MaxConcurrency": 3,
+      "ResultPath": "$.summarizeResults",
+      "Iterator": {
+        "StartAt": "SummarizeSingleArticle",
+        "States": {
+          "SummarizeSingleArticle": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${SummarizeLambdaArn}",
+              "Payload.$": "$.Payload.body"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException"
+                ],
+                "IntervalSeconds": 3,
+                "MaxAttempts": 3,
+                "BackoffRate": 2.0
+              },
+              {
+                "ErrorEquals": [
+                  "States.TaskFailed"
+                ],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 2,
+                "BackoffRate": 2.0
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "SummarizeArticleError",
+                "ResultPath": "$.error"
+              }
+            ],
+            "Next": "SummarizeArticleSuccess"
+          },
+          "SummarizeArticleSuccess": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${SendToSlackLambdaArn}",
+              "Payload.$": "$.Payload.body"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 3,
+                "BackoffRate": 2.0
+              },
+              {
+                "ErrorEquals": ["States.TaskFailed"],
+                "IntervalSeconds": 1,
+                "MaxAttempts": 3,
+                "BackoffRate": 2.0
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "Next": "SlackSendError",
+                "ResultPath": "$.slackError"
+              }
+            ],
+            "End": true
+          },
+          "SlackSendError": {
+            "Type": "Pass",
+            "Parameters": {
+              "url.$": "$.Payload.body.url",
+              "title.$": "$.Payload.body.title",
+              "summary.$": "$.Payload.body.summary",
+              "error.$": "$.slackError",
+              "status": "summary_success_slack_failed"
+            },
+            "End": true
+          },
+          "SummarizeArticleError": {
+            "Type": "Pass",
+            "Parameters": {
+              "url.$": "$.Payload.body.url",
+              "title.$": "$.Payload.body.title",
+              "summary": "Summary could not be generated due to processing error",
+              "error.$": "$.error",
+              "status": "failed_summary"
+            },
+            "End": true
+          }
+        }
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "HandleSummarizeError",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "ProcessingComplete"
+    },
+    "ProcessingComplete": {
+      "Type": "Pass",
+      "Parameters": {
+        "statusCode": 200,
+        "message": "Processing completed successfully",
+        "articlesProcessed.$": "States.ArrayLength($.summarizeResults)",
+        "totalArticles.$": "States.ArrayLength($.parseResult.Payload)",
+        "executionTime.$": "$$.Execution.StartTime"
+      },
+      "End": true
+    },
+    "NoArticlesFound": {
+      "Type": "Pass",
+      "Parameters": {
+        "statusCode": 200,
+        "message": "No articles found in email content",
+        "articlesProcessed": 0,
+        "totalArticles": 0
+      },
+      "End": true
+    },
+    "NoArticlesFetched": {
+      "Type": "Pass",
+      "Parameters": {
+        "statusCode": 206,
+        "message": "No articles could be fetched successfully",
+        "articlesProcessed": 0,
+        "totalArticles.$": "States.ArrayLength($.parseResult.Payload)",
+        "errors": [
+          "All article fetch attempts failed"
+        ]
+      },
+      "End": true
+    },
+
+    "HandleParseError": {
+      "Type": "Pass",
+      "Parameters": {
+        "statusCode": 400,
+        "message": "Failed to parse email content",
+        "articlesProcessed": 0,
+        "error.$": "$.error"
+      },
+      "End": true
+    },
+    "HandleFetchError": {
+      "Type": "Pass",
+      "Parameters": {
+        "statusCode": 500,
+        "message": "Critical error during article fetching",
+        "articlesProcessed": 0,
+        "error.$": "$.error"
+      },
+      "End": true
+    },
+    "HandleSummarizeError": {
+      "Type": "Pass",
+      "Parameters": {
+        "statusCode": 500,
+        "message": "Critical error during article summarization",
+        "articlesProcessed": 0,
+        "error.$": "$.error"
+      },
+      "End": true
+    }
+  }
+}

@@ -41,9 +41,41 @@ AWS Serverless application that processes Medium Daily Digest emails, extracts a
    aws configure --profile medium-digest
    ```
 
+4. **Configure Secrets** (Required before deployment):
+   - Create your Slack webhook URL in your Slack workspace
+   - Obtain Medium authentication cookies from your browser
+   - Update the CDK stack with your actual values:
+     - Replace `REPLACE_WITH_YOUR_SLACK_WEBHOOK_URL` in `medium_digest_summarizer_stack.py`
+     - Replace `REPLACE_WITH_YOUR_MEDIUM_COOKIES` in `deploy.py`
+
+## Security
+
+⚠️ **Important Security Notes:**
+- This repository has been cleaned of all sensitive authentication data
+- Never commit actual webhook URLs or authentication cookies to version control
+- Use AWS Secrets Manager for storing sensitive configuration
+- The `.gitignore` file is configured to prevent accidental commits of sensitive files
+
+## Deployment
+
+1. Ensure you have configured your secrets (see Setup step 4)
+2. Deploy the CDK stack:
+   ```bash
+   cdk deploy --profile medium-digest
+   ```
+
 ## Development
 
 The project uses AWS CDK with Python bindings and is configured to use the `medium-digest` AWS profile for deployment.
+
+## Architecture
+
+The system processes Medium Daily Digest emails through a serverless pipeline:
+1. **S3 Bucket** - Stores uploaded email files
+2. **Step Function** - Orchestrates the processing workflow
+3. **Lambda Functions** - Handle parsing, fetching, summarizing, and notifications
+4. **AWS Bedrock Nova** - Generates AI-powered article summaries
+5. **Slack Integration** - Sends formatted summaries to your Slack channel
 
 ## Next Steps
 
